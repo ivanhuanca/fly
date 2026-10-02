@@ -4,9 +4,16 @@ import random
 import sys
 import time
 import tkinter as tk
+import ctypes
+import math
+import random
+import sys
+import time
+import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+
 from PIL import Image, ImageTk
 
 
@@ -15,97 +22,294 @@ FRAME_INTERVAL = 0.09
 TICK_INTERVAL = 33
 WALK_SPEED = 115
 DIRECTION_STEPS = 16
+MIN_SIZE = 24
+MAX_SIZE = 128
+MAX_FLIES = 20
+SPRITES = ("1.png", "2.png", "3.png")
 VK_CONTROL = 0x11
 VK_MENU = 0x12
 VK_F8 = 0x77
 VK_F9 = 0x78
 
 
-class DesktopFly:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.overrideredirect(True)
-        self.root.configure(bg=TRANSPARENT_COLOR)
-        self.root.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
-        self.root.wm_attributes("-topmost", True)
-        self.root.wm_attributes("-toolwindow", True)
-
-        sprite_path = Path(__file__).with_name("1.png")
-        if not sprite_path.is_file():
-            raise FileNotFoundError(f"No se encontro el sprite: {sprite_path}")
-
-        with Image.open(sprite_path) as image:
-            sprite_sheet = image.convert("RGBA")
-        self.clean_frames = self._load_frames(sprite_sheet, 0, 18)
-        self.walk_frames = self._load_frames(sprite_sheet, 18, 36)
-        self.frame_size = self.walk_frames[0].width
-        self.direction_index = 0
-        self.rotated_frames = {}
+class FlySprite:
+    def __init__(self, app):
+        self.app = app
+        self.window = tk.Toplevel(app.root)
+        self.window.overrideredirect(True)
+        self.window.configure(bg=TRANSPARENT_COLOR)
+        self.window.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+        self.window.wm_attributes("-topmost", True)
+        self.window.wm_attributes("-toolwindow", True)
 
         self.canvas = tk.Canvas(
-            self.root,
-            width=self.frame_size,
-            height=self.frame_size,
+            self.window,
+            width=app.window_size,
+            height=app.window_size,
             bg=TRANSPARENT_COLOR,
             highlightthickness=0,
             borderwidth=0,
         )
         self.canvas.pack()
         self.image_id = self.canvas.create_image(0, 0, anchor="nw")
-        self._show_frame(self.walk_frames[0])
 
-        self.screen_width = self.root.winfo_screenwidth()
-        self.screen_height = self.root.winfo_screenheight()
-        self.max_x = max(0, self.screen_width - self.frame_size)
-        self.max_y = max(0, self.screen_height - self.frame_size)
+        self.screen_width = app.root.winfo_screenwidth()
+        self.screen_height = app.root.winfo_screenheight()
+        self.max_x = max(0, self.screen_width - app.window_size)
+        self.max_y = max(0, self.screen_height - app.window_size)
         self.x = random.uniform(0, self.max_x)
         self.y = random.uniform(0, self.max_y)
         self.target_x = self.x
         self.target_y = self.y
-        self.root.geometry(f"{self.frame_size}x{self.frame_size}+{round(self.x)}+{round(self.y)}")
-
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self.root.after(100, self._configure_window)
-        self.user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
-        self.user32.GetAsyncKeyState.restype = ctypes.c_short
-        self.hotkey_states = {VK_F8: False, VK_F9: False}
+        self.window.geometry(
+            f"{app.window_size}x{app.window_size}+{round(self.x)}+{round(self.y)}"
+        )
 
         now = time.monotonic()
         self.mode = "walking"
         self.frame_index = 0
+        self.direction_index = 0
         self.next_frame_at = now + FRAME_INTERVAL
         self.clean_at = now + random.uniform(6, 12)
         self.last_tick = now
+        self._show_frame()
+        self.window.after(100, app._configure_overlay_window, self.window)
+
+    def _show_frame(self):
+        image = self.app._get_photo(self.mode, self.frame_index, self.direction_index)
+        self.canvas.itemconfigure(self.image_id, image=image)
+
+    def update_appearance(self):
+        self.max_x = max(0, self.screen_width - self.app.window_size)
+        self.max_y = max(0, self.screen_height - self.app.window_size)
+        self.x = min(self.x, self.max_x)
+        self.y = min(self.y, self.max_y)
+        self.canvas.configure(width=self.app.window_size, height=self.app.window_size)
+        self.window.geometry(
+            f"{self.app.window_size}x{self.app.window_size}+{round(self.x)}+{round(self.y)}"
+        )
+        self._show_frame()
+
+    def _choose_target(self):
+        self.target_x = random.uniform(0, self.max_x)
+        self.target_y = random.uniform(0, self.max_y)
+
+    def tick(self, now):
+        elapsed = min(now - self.last_tick, 0.1)
+        self.last_tick = now
+
+        if self.mode == "cleaning":
+            if now >= self.next_frame_at:
+                self.frame_index += 1
+                if self.frame_index == 18:
+                    self.mode = "walking"
+                    self.frame_index = 0
+                    self.clean_at = now + random.uniform(9, 18)
+                self._show_frame()
+                self.next_frame_at = now + FRAME_INTERVAL
+            return
+
+        if now >= self.clean_at:
+            self.mode = "cleaning"
+            self.frame_index = 0
+            self.next_frame_at = now + FRAME_INTERVAL
+            self._show_frame()
+            return
+
+        distance_x = self.target_x - self.x
+        distance_y = self.target_y - self.y
+        distance = (distance_x * distance_x + distance_y * distance_y) ** 0.5
+        if distance > 1:
+            heading = math.degrees(math.atan2(distance_x, -distance_y))
+            direction_index = round(heading / (360 / DIRECTION_STEPS)) % DIRECTION_STEPS
+            if direction_index != self.direction_index:
+                self.direction_index = direction_index
+                self._show_frame()
+
+        step = WALK_SPEED * elapsed
+        if distance <= step or distance < 1:
+            self.x, self.y = self.target_x, self.target_y
+            self._choose_target()
+        else:
+            self.x += distance_x / distance * step
+            self.y += distance_y / distance * step
+        self.window.geometry(f"+{round(self.x)}+{round(self.y)}")
+
+        if now >= self.next_frame_at:
+            self.frame_index = (self.frame_index + 1) % 18
+            self._show_frame()
+            self.next_frame_at = now + FRAME_INTERVAL
+
+    def destroy(self):
+        self.window.destroy()
+
+
+class DesktopFly:
+    def __init__(self):
+        if sys.platform != "win32":
+            raise RuntimeError("Esta aplicacion necesita Windows.")
+
+        self.root = tk.Tk()
+        self.root.title("Moscas de escritorio")
+        self.root.geometry("380x270")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#edf2ee")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._configure_windows_api()
+        self.user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+        self.user32.GetAsyncKeyState.restype = ctypes.c_short
+        self.hotkey_states = {VK_F8: False, VK_F9: False}
+
+        self.flies = []
+        self.photo_cache = {}
+        self.animations = {}
+        self.active_appearance = None
         self.paused = False
         self.paused_at = None
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.count_job = None
+        self.appearance_job = None
+        self.setting_count = False
+
+        self.count_var = tk.StringVar(value="3")
+        self.size_var = tk.IntVar(value=56)
+        self.sprite_var = tk.StringVar(value="1.png")
+        self._build_panel()
+        self._apply_appearance()
+        self._apply_count()
         self.root.after(TICK_INTERVAL, self._tick)
 
-    def _load_frames(self, sprite_sheet, first, stop):
-        cell_width = sprite_sheet.width // 6
-        cell_height = sprite_sheet.height // 6
-        frame_size = round(min(cell_width, cell_height) / 3.5)
-        frames = []
+    def _configure_windows_api(self):
+        self.user32.GetParent.argtypes = (wintypes.HWND,)
+        self.user32.GetParent.restype = wintypes.HWND
+        self.user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+        self.user32.GetWindowLongW.restype = ctypes.c_long
+        self.user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_long)
+        self.user32.SetWindowLongW.restype = ctypes.c_long
+        self.user32.SetWindowPos.argtypes = (
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        )
+        self.user32.SetWindowPos.restype = wintypes.BOOL
 
-        for index in range(first, stop):
+    def _build_panel(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("App.TFrame", background="#edf2ee")
+        style.configure(
+            "Title.TLabel",
+            background="#edf2ee",
+            foreground="#183a34",
+            font=("Segoe UI", 14, "bold"),
+        )
+        style.configure(
+            "Status.TLabel",
+            background="#edf2ee",
+            foreground="#48665c",
+            font=("Segoe UI", 9),
+        )
+        style.configure("TLabel", background="#edf2ee", foreground="#263c36")
+        style.configure("TButton", padding=(10, 5))
+        style.configure("TCombobox", padding=4)
+        style.configure("TSpinbox", padding=4)
+
+        panel = ttk.Frame(self.root, style="App.TFrame", padding=(20, 18))
+        panel.pack(fill="both", expand=True)
+        panel.columnconfigure(1, weight=1)
+
+        ttk.Label(panel, text="Moscas de escritorio", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Separator(panel).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 14))
+
+        ttk.Label(panel, text="Cantidad").grid(row=2, column=0, sticky="w", pady=5)
+        count_input = ttk.Spinbox(
+            panel,
+            from_=0,
+            to=MAX_FLIES,
+            width=7,
+            textvariable=self.count_var,
+            command=self._apply_count,
+        )
+        count_input.grid(row=2, column=1, sticky="e", pady=5)
+        count_input.bind("<KeyRelease>", self._queue_count_update)
+        count_input.bind("<FocusOut>", self._apply_count)
+        count_input.bind("<Return>", self._apply_count)
+        self.count_var.trace_add("write", self._queue_count_update)
+
+        size_row = ttk.Frame(panel, style="App.TFrame")
+        size_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(size_row, text="Tamano").pack(side="left")
+        self.size_value = ttk.Label(size_row, text="56 px", style="Status.TLabel")
+        self.size_value.pack(side="right")
+        self.size_scale = tk.Scale(
+            panel,
+            from_=MIN_SIZE,
+            to=MAX_SIZE,
+            resolution=4,
+            orient="horizontal",
+            variable=self.size_var,
+            showvalue=False,
+            highlightthickness=0,
+            bd=0,
+            bg="#edf2ee",
+            fg="#263c36",
+            troughcolor="#cbd9cf",
+            activebackground="#d45c37",
+            command=self._queue_appearance_update,
+        )
+        self.size_scale.grid(row=4, column=0, columnspan=2, sticky="ew")
+
+        ttk.Label(panel, text="Sprite").grid(row=5, column=0, sticky="w", pady=(5, 10))
+        sprite_input = ttk.Combobox(
+            panel,
+            textvariable=self.sprite_var,
+            values=SPRITES,
+            state="readonly",
+            width=12,
+        )
+        sprite_input.grid(row=5, column=1, sticky="e", pady=(5, 10))
+        sprite_input.bind("<<ComboboxSelected>>", self._select_sprite)
+
+        actions = ttk.Frame(panel, style="App.TFrame")
+        actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(3, 0))
+        self.pause_button = ttk.Button(actions, text="Pausar", command=self._toggle_pause)
+        self.pause_button.pack(side="left")
+        self.status_label = ttk.Label(actions, text="", style="Status.TLabel")
+        self.status_label.pack(side="right", pady=5)
+
+    def _load_animation(self, sprite_name, size):
+        sprite_path = Path(__file__).with_name(sprite_name)
+        if not sprite_path.is_file():
+            raise FileNotFoundError(f"No se encontro el sprite: {sprite_path}")
+
+        with Image.open(sprite_path) as image:
+            sprite_sheet = image.convert("RGBA")
+
+        animations = {"cleaning": [], "walking": []}
+        window_size = math.ceil(size * math.sqrt(2))
+        for index in range(36):
             column, row = index % 6, index // 6
-            tile = sprite_sheet.crop(
-                (
-                    column * cell_width,
-                    row * cell_height,
-                    (column + 1) * cell_width,
-                    (row + 1) * cell_height,
-                )
-            )
-            tile = tile.resize((frame_size, frame_size), Image.Resampling.LANCZOS)
+            left = round(column * sprite_sheet.width / 6)
+            top = round(row * sprite_sheet.height / 6)
+            right = round((column + 1) * sprite_sheet.width / 6)
+            bottom = round((row + 1) * sprite_sheet.height / 6)
+            tile = sprite_sheet.crop((left, top, right, bottom))
+            tile = tile.resize((size, size), Image.Resampling.LANCZOS)
             tile = self._clean_transparency(tile)
-            rotation_size = math.ceil(frame_size * math.sqrt(2))
-            padded_tile = Image.new("RGBA", (rotation_size, rotation_size), (0, 0, 0, 0))
-            offset = (rotation_size - frame_size) // 2
-            padded_tile.alpha_composite(tile, (offset, offset))
-            frames.append(padded_tile)
+            padded_tile = Image.new("RGBA", (window_size, window_size), (0, 0, 0, 0))
+            offset = ((window_size - size) // 2, (window_size - size) // 2)
+            padded_tile.alpha_composite(tile, offset)
+            mode = "cleaning" if index < 18 else "walking"
+            animations[mode].append(padded_tile)
 
-        return frames
+        return animations, window_size
 
     def _clean_transparency(self, image):
         alpha = image.getchannel("A").point(lambda value: value if value >= 17 else 0)
@@ -143,47 +347,106 @@ class DesktopFly:
         image.putalpha(alpha)
         return image
 
-    def _show_frame(self, frame):
-        cache_key = (id(frame), self.direction_index)
-        photo = self.rotated_frames.get(cache_key)
+    def _get_photo(self, mode, frame_index, direction_index):
+        cache_key = (mode, frame_index, direction_index)
+        photo = self.photo_cache.get(cache_key)
         if photo is None:
-            angle = -self.direction_index * (360 / DIRECTION_STEPS)
+            frame = self.animations[mode][frame_index]
+            angle = -direction_index * (360 / DIRECTION_STEPS)
             rotated = frame.rotate(
                 angle,
                 resample=Image.Resampling.BICUBIC,
                 fillcolor=(0, 0, 0, 0),
             )
             photo = ImageTk.PhotoImage(rotated, master=self.root)
-            self.rotated_frames[cache_key] = photo
-        self.canvas.itemconfigure(self.image_id, image=photo)
-        self.current_frame = photo
+            self.photo_cache[cache_key] = photo
+        return photo
 
-    def _configure_window(self):
-        user32 = self.user32
-        user32.GetParent.argtypes = (wintypes.HWND,)
-        user32.GetParent.restype = wintypes.HWND
-        user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
-        user32.GetWindowLongW.restype = ctypes.c_long
-        user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_long)
-        user32.SetWindowLongW.restype = ctypes.c_long
-        user32.SetWindowPos.argtypes = (
-            wintypes.HWND,
-            wintypes.HWND,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.UINT,
-        )
-        user32.SetWindowPos.restype = wintypes.BOOL
-
-        hwnd = wintypes.HWND(self.root.winfo_id())
-        hwnd = user32.GetParent(hwnd) or hwnd
-        ex_style = user32.GetWindowLongW(hwnd, -20)
+    def _configure_overlay_window(self, window):
+        hwnd = wintypes.HWND(window.winfo_id())
+        hwnd = self.user32.GetParent(hwnd) or hwnd
+        ex_style = self.user32.GetWindowLongW(hwnd, -20)
         ex_style |= 0x00000020 | 0x00000080 | 0x08000000
-        user32.SetWindowLongW(hwnd, -20, ex_style)
-        if not user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0073):
+        self.user32.SetWindowLongW(hwnd, -20, ex_style)
+        if not self.user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0073):
             raise ctypes.WinError(ctypes.get_last_error())
+
+    def _queue_count_update(self, *_):
+        if self.setting_count or not self.count_var.get().isdigit():
+            return
+        if self.count_job is not None:
+            self.root.after_cancel(self.count_job)
+        self.count_job = self.root.after(120, self._apply_count)
+
+    def _apply_count(self, _event=None):
+        self.count_job = None
+        value = self.count_var.get()
+        if not value.isdigit():
+            self.setting_count = True
+            self.count_var.set(str(len(self.flies)))
+            self.setting_count = False
+            return
+
+        requested = max(0, min(MAX_FLIES, int(value)))
+        if requested != int(value):
+            self.setting_count = True
+            self.count_var.set(str(requested))
+            self.setting_count = False
+
+        while len(self.flies) < requested:
+            self.flies.append(FlySprite(self))
+        while len(self.flies) > requested:
+            self.flies.pop().destroy()
+        self._update_status()
+
+    def _queue_appearance_update(self, value=None):
+        if value is not None:
+            size = int(round(float(value) / 4) * 4)
+            self.size_value.configure(text=f"{size} px")
+        if self.appearance_job is not None:
+            self.root.after_cancel(self.appearance_job)
+        self.appearance_job = self.root.after(120, self._apply_appearance)
+
+    def _select_sprite(self, _event=None):
+        if self.appearance_job is not None:
+            self.root.after_cancel(self.appearance_job)
+            self.appearance_job = None
+        self._apply_appearance()
+
+    def _apply_appearance(self):
+        self.appearance_job = None
+        sprite_name = self.sprite_var.get()
+        size = int(self.size_var.get())
+        appearance = (sprite_name, size)
+        if appearance == self.active_appearance:
+            return
+
+        self.animations, self.window_size = self._load_animation(sprite_name, size)
+        self.active_appearance = appearance
+        self.photo_cache.clear()
+        for fly in self.flies:
+            fly.update_appearance()
+        self._update_status()
+
+    def _update_status(self):
+        count = len(self.flies)
+        noun = "mosca" if count == 1 else "moscas"
+        self.status_label.configure(text=f"{count} {noun} | {self.sprite_var.get()}")
+
+    def _toggle_pause(self):
+        now = time.monotonic()
+        if self.paused:
+            paused_for = now - self.paused_at
+            for fly in self.flies:
+                fly.clean_at += paused_for
+                fly.next_frame_at += paused_for
+                fly.last_tick = now
+            self.paused = False
+            self.pause_button.configure(text="Pausar")
+        else:
+            self.paused = True
+            self.paused_at = now
+            self.pause_button.configure(text="Reanudar")
 
     def _poll_hotkeys(self):
         modifiers_down = bool(self.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000) and bool(
@@ -200,77 +463,19 @@ class DesktopFly:
                 return False
         return True
 
-    def _toggle_pause(self):
-        now = time.monotonic()
-        self.paused = not self.paused
-        if self.paused:
-            self.paused_at = now
-        else:
-            paused_for = now - self.paused_at
-            self.clean_at += paused_for
-            self.next_frame_at += paused_for
-            self.last_tick = now
-
-    def _choose_target(self):
-        self.target_x = random.uniform(0, self.max_x)
-        self.target_y = random.uniform(0, self.max_y)
-
     def _tick(self):
         if not self._poll_hotkeys():
             return
-
-        now = time.monotonic()
-        if self.paused:
-            self.root.after(TICK_INTERVAL, self._tick)
-            return
-
-        elapsed = min(now - self.last_tick, 0.1)
-        self.last_tick = now
-
-        if self.mode == "cleaning":
-            if now >= self.next_frame_at:
-                self.frame_index += 1
-                if self.frame_index == len(self.clean_frames):
-                    self.mode = "walking"
-                    self.frame_index = 0
-                    self.clean_at = now + random.uniform(9, 18)
-                    self._show_frame(self.walk_frames[0])
-                else:
-                    self._show_frame(self.clean_frames[self.frame_index])
-                self.next_frame_at = now + FRAME_INTERVAL
-        elif now >= self.clean_at:
-            self.mode = "cleaning"
-            self.frame_index = 0
-            self.next_frame_at = now + FRAME_INTERVAL
-            self._show_frame(self.clean_frames[0])
-        else:
-            distance_x = self.target_x - self.x
-            distance_y = self.target_y - self.y
-            distance = (distance_x * distance_x + distance_y * distance_y) ** 0.5
-            if distance > 1:
-                heading = math.degrees(math.atan2(distance_x, -distance_y))
-                direction_index = round(heading / (360 / DIRECTION_STEPS)) % DIRECTION_STEPS
-                if direction_index != self.direction_index:
-                    self.direction_index = direction_index
-                    self._show_frame(self.walk_frames[self.frame_index])
-
-            step = WALK_SPEED * elapsed
-            if distance <= step or distance < 1:
-                self.x, self.y = self.target_x, self.target_y
-                self._choose_target()
-            else:
-                self.x += distance_x / distance * step
-                self.y += distance_y / distance * step
-            self.root.geometry(f"+{round(self.x)}+{round(self.y)}")
-
-            if now >= self.next_frame_at:
-                self.frame_index = (self.frame_index + 1) % len(self.walk_frames)
-                self._show_frame(self.walk_frames[self.frame_index])
-                self.next_frame_at = now + FRAME_INTERVAL
-
+        if not self.paused:
+            now = time.monotonic()
+            for fly in tuple(self.flies):
+                fly.tick(now)
         self.root.after(TICK_INTERVAL, self._tick)
 
     def close(self):
+        for fly in self.flies:
+            fly.destroy()
+        self.flies.clear()
         self.root.destroy()
 
     def run(self):
@@ -278,15 +483,12 @@ class DesktopFly:
 
 
 def main():
-    if sys.platform != "win32":
-        raise SystemExit("Esta aplicacion necesita Windows.")
-
     try:
         DesktopFly().run()
-    except (FileNotFoundError, OSError, tk.TclError) as error:
+    except (FileNotFoundError, OSError, RuntimeError, tk.TclError) as error:
         dialog = tk.Tk()
         dialog.withdraw()
-        messagebox.showerror("Mosca de escritorio", str(error), parent=dialog)
+        messagebox.showerror("Moscas de escritorio", str(error), parent=dialog)
         dialog.destroy()
 
 
