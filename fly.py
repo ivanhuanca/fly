@@ -4,17 +4,12 @@ import random
 import sys
 import time
 import tkinter as tk
-import ctypes
-import math
-import random
-import sys
-import time
-import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
+import pystray
 
 
 TRANSPARENT_COLOR = "#010203"
@@ -73,7 +68,9 @@ class FlySprite:
         self.clean_at = now + random.uniform(6, 12)
         self.last_tick = now
         self._show_frame()
-        self.window.after(100, app._configure_overlay_window, self.window)
+        self.overlay_job = self.window.after(
+            100, app._configure_overlay_window, self.window
+        )
 
     def _show_frame(self):
         image = self.app._get_photo(self.mode, self.frame_index, self.direction_index)
@@ -141,6 +138,9 @@ class FlySprite:
             self.next_frame_at = now + FRAME_INTERVAL
 
     def destroy(self):
+        if self.overlay_job is not None:
+            self.window.after_cancel(self.overlay_job)
+            self.overlay_job = None
         self.window.destroy()
 
 
@@ -154,7 +154,7 @@ class DesktopFly:
         self.root.geometry("380x270")
         self.root.resizable(False, False)
         self.root.configure(bg="#edf2ee")
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._configure_windows_api()
@@ -170,7 +170,11 @@ class DesktopFly:
         self.paused_at = None
         self.count_job = None
         self.appearance_job = None
+        self.tick_job = None
         self.setting_count = False
+        self.tray_icon = None
+        self.tray_image = None
+        self.closed = False
 
         self.count_var = tk.StringVar(value="3")
         self.size_var = tk.IntVar(value=56)
@@ -178,7 +182,46 @@ class DesktopFly:
         self._build_panel()
         self._apply_appearance()
         self._apply_count()
-        self.root.after(TICK_INTERVAL, self._tick)
+        self._start_tray_icon()
+        self.tick_job = self.root.after(TICK_INTERVAL, self._tick)
+
+    def _start_tray_icon(self):
+        icon_path = Path(__file__).with_name("fly.ico")
+        with Image.open(icon_path) as image:
+            self.tray_image = image.convert("RGBA").resize(
+                (32, 32), Image.Resampling.LANCZOS
+            )
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Mostrar controles", self._tray_show_panel, default=True),
+            pystray.MenuItem("Pausar / reanudar", self._tray_toggle_pause),
+            pystray.MenuItem("Salir", self._tray_exit),
+        )
+        self.tray_icon = pystray.Icon(
+            "MoscasEscritorio",
+            self.tray_image,
+            "Moscas de escritorio",
+            menu=menu,
+        )
+        self.tray_icon.run_detached()
+
+    def _tray_show_panel(self, _icon, _item):
+        self.root.after(0, self.show_panel)
+
+    def _tray_toggle_pause(self, _icon, _item):
+        self.root.after(0, self._toggle_pause)
+
+    def _tray_exit(self, _icon, _item):
+        self.root.after(0, self.close)
+
+    def hide_to_tray(self):
+        self.root.withdraw()
+
+    def show_panel(self):
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.lift()
+        self.root.focus_force()
 
     def _configure_windows_api(self):
         self.user32.GetParent.argtypes = (wintypes.HWND,)
@@ -464,15 +507,28 @@ class DesktopFly:
         return True
 
     def _tick(self):
+        self.tick_job = None
         if not self._poll_hotkeys():
             return
         if not self.paused:
             now = time.monotonic()
             for fly in tuple(self.flies):
                 fly.tick(now)
-        self.root.after(TICK_INTERVAL, self._tick)
+        self.tick_job = self.root.after(TICK_INTERVAL, self._tick)
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        for job in (self.count_job, self.appearance_job, self.tick_job):
+            if job is not None:
+                self.root.after_cancel(job)
+        self.count_job = None
+        self.appearance_job = None
+        self.tick_job = None
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
         for fly in self.flies:
             fly.destroy()
         self.flies.clear()
